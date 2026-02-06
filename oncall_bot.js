@@ -38,6 +38,7 @@ const FIND_BY_NAME = 2;
 const HELP_REGEX = new RegExp('^[hH]elp$');
 const WHO_REGEX = new RegExp('^[wW]ho$');
 const VERSION_REGEX = new RegExp('^[vV]ersion$');
+const PAGE_REGEX = /^page\s+(.+)$/i;
 
 /**
  * Send a message to the oncall people.
@@ -340,14 +341,31 @@ bot.on('message', function (data) {
               if (err) {
                 debug(err);
               } else {
-                if (message.match(WHO_REGEX)) { // who command
+                var pageMatch = message.match(PAGE_REGEX);
+                if (pageMatch) {
+                  var pageMessage = pageMatch[1];
+                  pagerDuty.createIncident(pageMessage, function (err, incident) {
+                    if (err) {
+                      bot.postMessageToUser(user.name,
+                        'Failed to create page: ' + err.message,
+                        {icon_emoji: iconEmoji});
+                    } else {
+                      bot.postMessageToUser(user.name,
+                        'Paged! Incident `' + incident.incident_number + '` created: _' + pageMessage + '_',
+                        {icon_emoji: iconEmoji});
+                    }
+                  });
+                }
+                else if (message.match(WHO_REGEX)) { // who command
                   postMessage(user.name, '', 'are the humans OnCall.', true);
                 }
                 else if (message.match(VERSION_REGEX)) { // version command
                   bot.postMessageToUser(user.name, 'I am *' + pjson.name + '* and running version ' + pjson.version + '.', {icon_emoji: iconEmoji});
                 }
                 else if (message.match(HELP_REGEX)) { // help command
-                  bot.postMessageToUser(user.name, 'I understand the following direct commands: *help*, *who* & *version*.', {icon_emoji: iconEmoji});
+                  bot.postMessageToUser(user.name,
+                    'I understand these commands: *help*, *who*, *version* & *page <message>*.',
+                    {icon_emoji: iconEmoji});
                 }
               }
             });

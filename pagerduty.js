@@ -28,6 +28,7 @@ var PagerDuty = function (options) {
   oncallsParams["schedule_ids[]"] = options.schedule_ids;
   this.token = options.pagerduty_token;
   this.cacheInterval = options.cache_interval_seconds;
+  this.fromEmail = options.from_email || '';
 };
 
 PagerDuty.prototype.getAllPaginatedData = function (options) {
@@ -126,6 +127,88 @@ PagerDuty.prototype.getOnCalls = function (params, callback) {
     }]
   }, function(err, result) {
     callback(null, result.setCacheData);
+  });
+};
+
+/**
+ * Resolve the service ID by walking: oncalls -> escalation_policy -> services.
+ * Caches the result so we only do this lookup once.
+ */
+PagerDuty.prototype.resolveServiceId = function (callback) {
+  var self = this;
+  var cached = self.cache.get('serviceId');
+  if (cached) {
+    return callback(null, cached);
+  }
+
+  self.getOnCalls(null, function (err, oncalls) {
+    if (err) return callback(err);
+
+    var firstEntry = _.find(oncalls, function () { return true; });
+    if (!firstEntry || !firstEntry.escalation_policy) {
+      return callback(new Error('No escalation policy found in oncalls data'));
+    }
+
+    var epId = firstEntry.escalation_policy.id;
+    debug('Resolved escalation policy: ' + epId);
+
+    var qs = querystring.stringify({"escalation_policy_ids[]": epId});
+    request.get({
+      url: self.endpoint + '/services?' + qs,
+      headers: self.headers,
+      json: true
+    }, function (error, response, body) {
+      if (error) return callback(error);
+      if (response.statusCode !== 200 || !body.services || body.services.length === 0) {
+        return callback(new Error('No service found for escalation policy ' + epId));
+      }
+      var serviceId = body.services[0].id;
+      debug('Resolved service: ' + serviceId);
+      self.cache.set('serviceId', serviceId, self.cacheInterval);
+      callback(null, serviceId);
+    });
+  });
+};
+
+PagerDuty.prototype.createIncident = function (title, callback) {
+  var self = this;
+
+  if (!self.fromEmail) {
+    return callback(new Error('pagerduty.from_email is not configured'));
+  }
+
+  self.resolveServiceId(function (err, serviceId) {
+    if (err) return callback(err);
+
+    var headers = _.extend({}, self.headers, {'From': self.fromEmail});
+
+    request.post({
+      url: self.endpoint + '/incidents',
+      headers: headers,
+      json: true,
+      body: {
+        incident: {
+          type: 'incident',
+          title: title,
+          service: {
+            id: serviceId,
+            type: 'service_reference'
+          }
+        }
+      }
+    }, function (error, response, body) {
+      if (error) {
+        debug('createIncident error: ' + error);
+        return callback(error);
+      }
+      if (response.statusCode !== 201) {
+        var msg = (body && body.error && body.error.message) || ('HTTP ' + response.statusCode);
+        debug('createIncident failed: ' + msg);
+        return callback(new Error(msg));
+      }
+      debug('createIncident success: ' + body.incident.id);
+      callback(null, body.incident);
+    });
   });
 };
 

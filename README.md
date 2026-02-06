@@ -11,6 +11,7 @@ Stop pinging people by name. Ping the rotation.
 | `@oncall` — summons on-call engineers into the room | `who` — lists current on-call members |
 | `@oncall who` — shows who's on rotation | `version` — prints bot version |
 | `@oncall Can you look at this?` — relays your message and tags whoever is on-call | `help` — lists commands |
+| | `page <message>` — creates a PagerDuty incident and pages the on-call engineer |
 
 Other bots can mention `@oncall` too. It just works.
 
@@ -55,7 +56,8 @@ Edit `config/default.json`:
   "pagerduty": {
     "pagerduty_token": "your-pagerduty-api-token",
     "schedule_ids": ["SCHEDULE_ID_1"],
-    "cache_interval_seconds": 300
+    "cache_interval_seconds": 300,
+    "from_email": "you@company.com"  // valid PD user email, required for `page` command
   }
 }
 ```
