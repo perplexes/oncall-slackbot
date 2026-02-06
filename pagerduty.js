@@ -103,7 +103,13 @@ PagerDuty.prototype.getAllPaginatedData = function (options) {
 };
 
 PagerDuty.prototype.getOnCalls = function (params, callback) {
-  var options = {contentIndex: "oncalls", secondaryIndex: 'user', sortBy: 'escalation_level', uri: "/oncalls", callback: callback, params: params || oncallsParams };
+  var cacheKey = "oncalls";
+  var effectiveParams = params || oncallsParams;
+  if (effectiveParams["schedule_ids[]"]) {
+    var ids = effectiveParams["schedule_ids[]"];
+    cacheKey = "oncalls:" + (Array.isArray(ids) ? ids.slice().sort().join(",") : ids);
+  }
+  var options = {contentIndex: cacheKey, secondaryIndex: 'user', sortBy: 'escalation_level', uri: "/oncalls", callback: callback, params: effectiveParams };
   var self = this;
   async.auto({
     getCacheData: function(cb) {
