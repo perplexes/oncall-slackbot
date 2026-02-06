@@ -11,16 +11,38 @@ Stop pinging people by name. Ping the rotation.
 | `@oncall` — summons on-call engineers into the room | `who` — lists current on-call members |
 | `@oncall who` — shows who's on rotation | `version` — prints bot version |
 | `@oncall Can you look at this?` — relays your message and tags whoever is on-call | `help` — lists commands |
+| | `link #channel <schedule>` — connect a channel to a PagerDuty schedule |
+| | `unlink #channel` — disconnect a channel |
+| | `list` — show all linked channels |
 
 Other bots can mention `@oncall` too. It just works.
+
+### Self-service setup
+
+Anyone can configure the bot for their channel — no config file changes, no redeploy. DM the bot:
+
+```
+link #service-team https://company.pagerduty.com/schedules/PXXXXXX
+```
+
+The bot saves the link in its local SQLite database, joins the channel, and starts responding to `@oncall` there using that schedule. To remove it:
+
+```
+unlink #service-team
+```
+
+You can also pass a raw schedule ID instead of a URL (`link #service-team PXXXXXX`).
+
+Channels without an explicit link fall back to the global `schedule_ids` in `config/default.json`, so existing setups keep working.
 
 ## Setup
 
 ### Prerequisites
 
-- Node.js (see `engines` in `package.json` for the pinned version)
+- Node.js >= 10 (native SQLite dependency requires it)
 - A Slack bot token ([create one here](https://my.slack.com/services/new/bot))
-- A PagerDuty API token and one or more schedule IDs
+- A PagerDuty API token
+- Schedule IDs are optional in config — they can be added per-channel via DM (see above)
 
 ### Install
 
@@ -73,6 +95,7 @@ For debug output:
 ```sh
 DEBUG=oncall_bot node oncall_bot.js    # bot logs
 DEBUG=pagerduty node oncall_bot.js     # PagerDuty API logs
+DEBUG=db node oncall_bot.js            # database logs
 DEBUG=* node oncall_bot.js             # everything
 ```
 
@@ -111,7 +134,9 @@ Good first contributions:
 ```
 oncall_bot.js        Main entry point — Slack RTM listener and command router
 pagerduty.js         PagerDuty API client — fetches current on-call users
+db.js                SQLite storage for channel ↔ schedule links
 config/sample.json   Configuration template
+oncall.db            Auto-created at runtime (gitignored)
 ```
 
 ## License

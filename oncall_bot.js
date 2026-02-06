@@ -10,6 +10,7 @@ var pjson = require('./package.json');
 var async = require('async');
 var debug = require('debug')('oncall_bot');
 var _ = require('underscore');
+var request = require('request');
 
 var SlackBot = require('slackbots');
 
@@ -20,6 +21,8 @@ var nextInQueueInterval = config.get("slack.next_in_queue_interval");
 
 var PagerDuty = require('./pagerduty.js');
 var pagerDuty = new PagerDuty(config.get('pagerduty'));
+
+var db = require('./db.js');
 
 // create a bot
 var bot = new SlackBot({
@@ -38,6 +41,70 @@ const FIND_BY_NAME = 2;
 const HELP_REGEX = new RegExp('^[hH]elp$');
 const WHO_REGEX = new RegExp('^[wW]ho$');
 const VERSION_REGEX = new RegExp('^[vV]ersion$');
+const LINK_REGEX = /^link\s+<#([^|>]+)(?:\|([^>]*))?>(?:\s+)<?([^\s>]+)>?$/i;
+const UNLINK_REGEX = /^unlink\s+<#([^|>]+)(?:\|([^>]*))?>$/i;
+const LIST_REGEX = /^list$/i;
+
+/**
+ * Parse a PagerDuty schedule ID from a URL or raw ID.
+ *
+ * Accepts:
+ *   https://company.pagerduty.com/schedules#PXXXXXX
+ *   https://company.pagerduty.com/schedules/PXXXXXX
+ *   PXXXXXX
+ */
+function parseScheduleId(input) {
+  var match = input.match(/schedules[#\/]([A-Za-z0-9]+)/);
+  if (match) return match[1];
+  if (/^[A-Za-z0-9]+$/.test(input)) return input;
+  return null;
+}
+
+/**
+ * Try to join a Slack channel using the Web API.
+ */
+function joinChannel(channelId, callback) {
+  request.post({
+    url: 'https://slack.com/api/conversations.join',
+    json: true,
+    headers: { 'Authorization': 'Bearer ' + config.get('slack.slack_token') },
+    body: { channel: channelId }
+  }, function (err, response, body) {
+    if (err) return callback(err);
+    if (body && !body.ok) return callback(new Error(body.error || 'unknown slack error'));
+    callback(null, body);
+  });
+}
+
+/**
+ * Build PagerDuty oncall params for a specific schedule.
+ */
+function buildScheduleParams(scheduleId) {
+  return {
+    "time_zone": 'UTC',
+    "include[]": 'users',
+    "schedule_ids[]": [scheduleId]
+  };
+}
+
+/**
+ * Resolve the schedule IDs for a given channel.
+ *
+ * If the channel has a linked schedule in the DB, use that.
+ * Otherwise fall back to global config schedule_ids.
+ * Returns null if no schedules are configured anywhere.
+ */
+function resolveScheduleParams(channelId) {
+  var link = db.getSchedule(channelId);
+  if (link) {
+    return buildScheduleParams(link.schedule_id);
+  }
+  var globalIds = config.get('pagerduty.schedule_ids');
+  if (globalIds && globalIds.length > 0 && globalIds[0] !== '') {
+    return null; // null tells getOnCalls to use default oncallsParams
+  }
+  return undefined; // no schedules at all
+}
 
 /**
  * Send a message to the oncall people.
@@ -45,7 +112,7 @@ const VERSION_REGEX = new RegExp('^[vV]ersion$');
  * @param message
  */
 var messageOnCalls = function (message) {
-  getOnCallSlackers(function (slackers) {
+  getOnCallSlackers(null, function (slackers) {
     _.each(slackers, function (slacker) {
       debug('POST MESSAGE TO: ' + slacker);
       bot.postMessageToUser(testUser || slacker, message, {icon_emoji: iconEmoji});
@@ -58,10 +125,11 @@ var messageOnCalls = function (message) {
  *
  * @param channel
  * @param message
+ * @param scheduleParams
  */
-var mentionOnCalls = function (channel, message) {
+var mentionOnCalls = function (channel, message, scheduleParams) {
   var usersToMention = '';
-  getOnCallSlackers(function (slackers) {
+  getOnCallSlackers(scheduleParams, function (slackers) {
     _.each(slackers, function (slacker) {
       usersToMention += '<@' + (testUser || slacker) + '> ';
     });
@@ -77,10 +145,11 @@ var mentionOnCalls = function (channel, message) {
  * @param preMessage
  * @param postMessage
  * @param direct
+ * @param scheduleParams
  */
-var postMessage = function (obj, preMessage, postMessage, direct) {
+var postMessage = function (obj, preMessage, postMessage, direct, scheduleParams) {
   var usersToMention = '';
-  getOnCallSlackers(function (slackers) {
+  getOnCallSlackers(scheduleParams, function (slackers) {
     _.each(slackers, function (slacker) {
       usersToMention += '<@' + (testUser || slacker) + '> ';
     });
@@ -222,11 +291,12 @@ var getUser = function (findBy, value = '', callback) {
 /**
  * Return who's on call.
  *
+ * @param scheduleParams  PagerDuty params with schedule_ids, or null for global default
  * @param callback
  */
-var getOnCallSlackers = function (callback) {
+var getOnCallSlackers = function (scheduleParams, callback) {
   var oncallSlackers = [];
-  pagerDuty.getOnCalls(null, function (err, pdUsers) {
+  pagerDuty.getOnCalls(scheduleParams, function (err, pdUsers) {
 
     async.each(pdUsers, function (pdUser, cb) {
       getUser(FIND_BY_EMAIL, pdUser.user.email, function (err, slacker) {
@@ -276,7 +346,7 @@ bot.on('start', function () {
       cacheChannels(callback);
     },
     function (callback) {
-      getOnCallSlackers(callback);
+      getOnCallSlackers(null, callback);
     }
   ], function () {
     var msg = config.get('slack.welcome_message').trim();
@@ -314,19 +384,25 @@ bot.on('message', function (data) {
         && (botTagIndex >= 0 || enableBotBotComm) ) {
         getChannel(data.channel, function (channel) {
           if (channel) {
+            var scheduleParams = resolveScheduleParams(data.channel);
+            if (scheduleParams === undefined) {
+              debug('No schedule configured for channel ' + channel.name);
+              return;
+            }
+
             if (message.match(new RegExp('^' + botTag + ':? who$'))) { // who command
-              postMessage(data.channel, '', 'are the humans OnCall.', false);
+              postMessage(data.channel, '', 'are the humans OnCall.', false, scheduleParams);
             }
             else if (message.match(new RegExp('^' + botTag + ':?$'))) { // need to support mobile which adds : after a mention
-              mentionOnCalls(channel.name, "get in here! :point_up_2:");
+              mentionOnCalls(channel.name, "get in here! :point_up_2:", scheduleParams);
             }
             else {  // default
               preText = (data.user ? ' <@' + data.user + '>' : botTag) +  ' said _"';
               if (botTagIndex == 0) {
-                mentionOnCalls(channel.name, preText + message.substr(botTag.length + 1) + '_"');
+                mentionOnCalls(channel.name, preText + message.substr(botTag.length + 1) + '_"', scheduleParams);
               } else if (data.user || enableBotBotComm) {
                 message = message.replace(/^<@(.*?)> +/,'');  // clean up spacing
-                mentionOnCalls(channel.name, preText + message + '_"');
+                mentionOnCalls(channel.name, preText + message + '_"', scheduleParams);
               }
             }
           }
@@ -340,14 +416,91 @@ bot.on('message', function (data) {
               if (err) {
                 debug(err);
               } else {
+                // link command
+                var linkMatch = message.match(LINK_REGEX);
+                if (linkMatch) {
+                  var channelId = linkMatch[1];
+                  var channelName = linkMatch[2] || channelId;
+                  var scheduleInput = linkMatch[3];
+                  var scheduleId = parseScheduleId(scheduleInput);
+
+                  if (!scheduleId) {
+                    bot.postMessageToUser(user.name,
+                      "I couldn't parse a schedule ID from that. Try a PagerDuty schedule URL or a raw schedule ID like `PXXXXXX`.",
+                      {icon_emoji: iconEmoji});
+                    return;
+                  }
+
+                  db.link(channelId, channelName, scheduleId, data.user);
+
+                  joinChannel(channelId, function (err) {
+                    if (err) {
+                      debug('Failed to join channel ' + channelName + ': ' + err.message);
+                      bot.postMessageToUser(user.name,
+                        'Linked <#' + channelId + '> to PagerDuty schedule `' + scheduleId + '`. ' +
+                        "I couldn't join the channel automatically — please invite me with `/invite @" + config.get('slack.bot_name') + "`.",
+                        {icon_emoji: iconEmoji});
+                    } else {
+                      bot.postMessageToUser(user.name,
+                        'Linked <#' + channelId + '> to PagerDuty schedule `' + scheduleId + '`. I\'ve joined the channel.',
+                        {icon_emoji: iconEmoji});
+                    }
+                  });
+                  return;
+                }
+
+                // unlink command
+                var unlinkMatch = message.match(UNLINK_REGEX);
+                if (unlinkMatch) {
+                  var channelId = unlinkMatch[1];
+                  var channelName = unlinkMatch[2] || channelId;
+
+                  if (db.unlink(channelId)) {
+                    bot.postMessageToUser(user.name,
+                      'Unlinked <#' + channelId + '>. I\'ll no longer respond to @oncall there (unless a global schedule is configured).',
+                      {icon_emoji: iconEmoji});
+                  } else {
+                    bot.postMessageToUser(user.name,
+                      '<#' + channelId + '> wasn\'t linked to any schedule.',
+                      {icon_emoji: iconEmoji});
+                  }
+                  return;
+                }
+
+                // list command
+                if (message.match(LIST_REGEX)) {
+                  var links = db.getAllLinks();
+                  if (links.length === 0) {
+                    bot.postMessageToUser(user.name,
+                      'No channels are linked to PagerDuty schedules yet. Use `link #channel <schedule>` to set one up.',
+                      {icon_emoji: iconEmoji});
+                  } else {
+                    var lines = links.map(function (l) {
+                      return '• <#' + l.channel_id + '> → `' + l.schedule_id + '`';
+                    });
+                    bot.postMessageToUser(user.name,
+                      '*Linked channels:*\n' + lines.join('\n'),
+                      {icon_emoji: iconEmoji});
+                  }
+                  return;
+                }
+
                 if (message.match(WHO_REGEX)) { // who command
-                  postMessage(user.name, '', 'are the humans OnCall.', true);
+                  postMessage(user.name, '', 'are the humans OnCall.', true, null);
                 }
                 else if (message.match(VERSION_REGEX)) { // version command
                   bot.postMessageToUser(user.name, 'I am *' + pjson.name + '* and running version ' + pjson.version + '.', {icon_emoji: iconEmoji});
                 }
                 else if (message.match(HELP_REGEX)) { // help command
-                  bot.postMessageToUser(user.name, 'I understand the following direct commands: *help*, *who* & *version*.', {icon_emoji: iconEmoji});
+                  bot.postMessageToUser(user.name,
+                    'I understand these commands:\n' +
+                    '• *help* — this message\n' +
+                    '• *who* — show who\'s on call\n' +
+                    '• *version* — show bot version\n' +
+                    '• *link #channel <schedule URL or ID>* — connect a channel to a PagerDuty schedule\n' +
+                    '• *unlink #channel* — disconnect a channel\n' +
+                    '• *list* — show all linked channels',
+                    {icon_emoji: iconEmoji});
                 }
               }
             });
