@@ -1,24 +1,119 @@
 # oncall-slackbot
 
-## Quick Description:
+Stop pinging people by name. Ping the rotation.
 
-This bot integrates #slack (https://slack.com/) with PagerDuty (https://www.pagerduty.com/).  
+**oncall-slackbot** connects [Slack](https://slack.com/) to [PagerDuty](https://www.pagerduty.com/) so your team can mention `@oncall` in any channel and reach whoever is currently on-call — no guessing, no outdated bookmarks, no "sorry, I'm off rotation."
 
-Mention `@oncall` on it's own in a #slackroom and the bot will summon those who are currently in active PagerDuty rotation to join the room.  Mention `@oncall` with a message afterwards (ie. `@oncall Can you take a look?`) and it will repeat the message with those in rotation prefixed to the message.  
+## How It Works
 
-## Why?
+| In a channel | In a DM with the bot |
+|---|---|
+| `@oncall` — summons on-call engineers into the room | `who` — lists current on-call members |
+| `@oncall who` — shows who's on rotation | `version` — prints bot version |
+| `@oncall Can you look at this?` — relays your message and tags whoever is on-call | `help` — lists commands |
 
-Seems only logical to share the duties instead of people always asking specific people to solve a problem.  Our front line customer service team has a dedicated channel to identify possible issues and allowing them to have a spefific "user/bot" to ping speeds up the response time.  
+Other bots can mention `@oncall` too. It just works.
 
-## Supported commands
+## Setup
 
-* **help** : displays the commands that are possible
-* **who** : will state who is currently in PagerDuty rotation
-* **version** : states the version of the bot that is deployed.
+### Prerequisites
 
-In a specific channel, these commands are broadcast to those in it (ie. `@oncall who`). When chatting directly with the bot, the interaction is simply between the user and the bot.
+- Node.js (see `engines` in `package.json` for the pinned version)
+- A Slack bot token ([create one here](https://my.slack.com/services/new/bot))
+- A PagerDuty API token and one or more schedule IDs
 
-Support exists for other bots to reference this bot as well.
+### Install
 
-## Other
-This was built to solve our problem.  Feel free to improve and fix it if you find issues - we all win.
+```sh
+git clone https://github.com/MadisonReed/oncall-slackbot.git
+cd oncall-slackbot
+npm install
+```
+
+### Configure
+
+Copy the sample config and fill in your credentials:
+
+```sh
+cp config/sample.json config/default.json
+```
+
+Edit `config/default.json`:
+
+```jsonc
+{
+  "slack": {
+    "slack_token": "xoxb-your-slack-bot-token",
+    "bot_name": "OnCall Bot",
+    "emoji": ":pagerduty:",
+    "emoji_conversation": ":pager: :poop:",
+    "welcome_message": "OnCall Bot is alive.  TAG - you're it!",
+    "cache_interval_seconds": 3600,
+    "next_in_queue_interval": 60,
+    "test_user": ""              // optional — route all messages to one user for testing
+  },
+  "pagerduty": {
+    "pagerduty_token": "your-pagerduty-api-token",
+    "schedule_ids": ["SCHEDULE_ID_1"],
+    "cache_interval_seconds": 300
+  }
+}
+```
+
+> `config/default.json` is gitignored. Your tokens stay local.
+
+### Run
+
+```sh
+node oncall_bot.js
+```
+
+For debug output:
+
+```sh
+DEBUG=oncall_bot node oncall_bot.js    # bot logs
+DEBUG=pagerduty node oncall_bot.js     # PagerDuty API logs
+DEBUG=* node oncall_bot.js             # everything
+```
+
+For production, use a process manager like [PM2](https://pm2.keymetrics.io/):
+
+```sh
+npx pm2 start oncall_bot.js --name oncall-slackbot
+```
+
+## Testing
+
+There is no automated test suite yet. To test manually:
+
+1. Set `"test_user"` in your config to your own Slack username.
+2. Run the bot and mention `@oncall` in a test channel.
+3. All notifications route to you instead of the real rotation.
+
+Adding a proper test framework (Jest, Mocha, etc.) is a welcome contribution — see below.
+
+## Contributing
+
+1. Fork the repo and create a feature branch.
+2. Make your changes.
+3. Test locally using the `test_user` config flag.
+4. Open a pull request with a clear description of what changed and why.
+
+Good first contributions:
+
+- Add a test suite
+- Dockerize the bot
+- Upgrade to a modern Slack SDK (Bolt)
+- Improve error handling and logging
+
+## Project Structure
+
+```
+oncall_bot.js        Main entry point — Slack RTM listener and command router
+pagerduty.js         PagerDuty API client — fetches current on-call users
+config/sample.json   Configuration template
+```
+
+## License
+
+Built by [Madison Reed](https://www.madison-reed.com/) engineering. Feel free to improve it — we all win.
